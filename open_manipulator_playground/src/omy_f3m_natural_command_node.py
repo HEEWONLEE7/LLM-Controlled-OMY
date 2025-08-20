@@ -15,6 +15,8 @@ from rclpy.action import ActionClient
 from geometry_msgs.msg import PoseStamped
 from geometry_msgs.msg import PoseStamped
 from moveit_msgs.srv import GetPositionIK
+from tf2_ros import Buffer, TransformListener
+
 import threading  # ← ADDED: background spin for timers
 
 # LLM-only JSON parser (loaded once / cached internally)
@@ -49,6 +51,9 @@ class NaturalCommandNode(Node):
         self.arm_pub = self.create_publisher(JointTrajectory, '/arm_controller/joint_trajectory', 10)
         self.gripper_client = ActionClient(self, GripperCommand, '/gripper_controller/gripper_cmd')
         self.ik_client = self.create_client(GetPositionIK, '/compute_ik')
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         while not self.ik_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('⏳ Waiting for /compute_ik service...')
 
@@ -136,7 +141,7 @@ class NaturalCommandNode(Node):
                     return
 
                 traj = JointTrajectory()
-                traj.joint_names = ['joint1', 'joint2', 'joint3', 'joint4']
+                traj.joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
                 point = JointTrajectoryPoint()
                 radius = L3 * math.cos(self.current_joint3_pos) + L_GRIPPER
                 delta = self.get_delta(value, unit, radius)
@@ -151,19 +156,35 @@ class NaturalCommandNode(Node):
                         return
 
                 elif action == "move":
-                    # 1. 현재 EE pose를 TF 또는 MoveGroup에서 읽기
-                    try:
-                        current_pose = self.move_group.get_current_pose().pose
-                    except Exception as e:
-                        self.get_logger().error(f"❌ Failed to get current EE pose: {e}")
+                    direction = cmd.get("direction")
+                    value = cmd.get("value")
+                    unit = cmd.get("unit")
+
+                    if value is None or unit is None or direction is None:
+                        self.get_logger().warn(f"⚠️ Incomplete fields for move: {cmd}")
                         return
 
+                    # 1. 현재 EE pose를 TF에서 읽기
+                    try:
+                        transform = self.tf_buffer.lookup_transform(
+                            "world",                # 기준 frame (URDF/SRDF 확인 필요)
+                            "end_effector_link",    # EE 링크 이름
+                            rclpy.time.Time()
+                        )
+                    except Exception as e:
+                        self.get_logger().error(f"❌ Failed to get current EE pose from TF: {e}")
+                        return
+
+                    # Transform → PoseStamped 변환
                     goal_pose = PoseStamped()
                     goal_pose.header.frame_id = "world"
-                    goal_pose.pose = current_pose  # 복사
+                    goal_pose.pose.position.x = transform.transform.translation.x
+                    goal_pose.pose.position.y = transform.transform.translation.y
+                    goal_pose.pose.position.z = transform.transform.translation.z
+                    goal_pose.pose.orientation = transform.transform.rotation  # orientation 유지
 
                     # 2. 이동 단위 (cm → m)
-                    step = value / 100.0
+                    step = value / 100.0 if unit.lower() == "cm" else float(value)
 
                     # 3. direction 해석
                     if direction == "up":
@@ -189,21 +210,21 @@ class NaturalCommandNode(Node):
                         goal_pose.pose.position.z
                     )
 
-                    # (선택) 최신 pose 업데이트
-                    self.current_pose = goal_pose.pose
-
 
                 point.positions = [
                     self.current_joint1_pos,
                     self.current_joint2_pos,
                     self.current_joint3_pos,
-                    self.current_joint4_pos
+                    self.current_joint4_pos,
+                    self.current_joint5_pos,
+                    self.current_joint6_pos
                 ]
                 point.time_from_start.sec = 2
                 traj.points.append(point)
                 self.arm_pub.publish(traj)
                 self.get_logger().info(f"✅ Joint movement completed: {point.positions}")
                 return
+
 
             self.get_logger().warn(f"⚠️ Unknown action: {action}")
 
@@ -230,7 +251,6 @@ class NaturalCommandNode(Node):
     def _on_keep_tick(self):
         if not self._keep_dir:
             return
-
 
         traj = JointTrajectory()
         traj.joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
@@ -370,7 +390,7 @@ def main():
     spin_thread = threading.Thread(target=_spin_worker, args=(node, stop_evt), daemon=True)
     spin_thread.start()
 
-    print("💬 Enter a command (e.g., 'move to 0.2 0.0 0.1', 'rotate left 10 degree', 'rotate right keep', 'stop', 'gripper open') - Type 'exit' to quit")
+    print("💬 Enter a command ")
     try:
         while rclpy.ok():
             text = input(">>> ").strip()
