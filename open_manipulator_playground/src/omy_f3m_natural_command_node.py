@@ -12,7 +12,6 @@ from control_msgs.action import GripperCommand
 from control_msgs.msg import GripperCommand as GripperCommandMsg
 from rclpy.action import ActionClient
 from geometry_msgs.msg import PoseStamped
-from geometry_msgs.msg import PoseStamped
 from moveit_msgs.srv import GetPositionIK
 from tf2_ros import Buffer, TransformListener
 
@@ -73,6 +72,39 @@ class NaturalCommandNode(Node):
         self._keep_dir = None
         self._keep_w_rad_s = math.radians(KEEP_ROTATE_SPEED_DEG_S)
 
+    def get_current_ee_pose(self):
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                "world", "end_effector_link", rclpy.time.Time()
+            )
+            pose = PoseStamped()
+            pose.header.frame_id = "world"
+            pose.pose.position.x = transform.transform.translation.x
+            pose.pose.position.y = transform.transform.translation.y
+            pose.pose.position.z = transform.transform.translation.z
+            pose.pose.orientation = transform.transform.rotation
+            return pose
+        except Exception as e:
+            self.get_logger().error(f"❌ Failed to get current EE pose: {e}")
+            return None
+
+    def parse_command_with_llm(self, text: str):
+        if not self.use_llm:
+            return None
+        try:
+            data = parse_to_json(text)
+            if not isinstance(data, dict):
+                return None
+            for k in ["action", "direction", "value", "unit", "xyz"]:
+                if k not in data:
+                    return None
+            if data["action"] is None:
+                return None
+            return data
+        except Exception as e:
+            self.get_logger().error(f"[LLM] parse failed: {e}")
+            return None
+        
     def parse_command_with_llm(self, text: str):
         if not self.use_llm:
             return None
@@ -101,7 +133,8 @@ class NaturalCommandNode(Node):
 
             if action == "move_xyz":
                 x, y, z = cmd["xyz"]
-                self.send_ik_request(x, y, z)
+                # ✅ orientation 전달 가능하도록 변경
+                self.send_ik_request(x, y, z, None)
                 return
 
             if action == "initialize":
@@ -151,31 +184,18 @@ class NaturalCommandNode(Node):
                         self.get_logger().warn(f"⚠️ Unsupported rotate direction: {direction}")
                         return
 
-                elif action == "move":
-                    direction = cmd.get("direction")
-                    value = cmd.get("value")
-                    unit = cmd.get("unit")
-
-                    if value is None or unit is None or direction is None:
-                        self.get_logger().warn(f"⚠️ Incomplete fields for move: {cmd}")
-                        return
-
-                    try:
-                        transform = self.tf_buffer.lookup_transform(
-                            "world",
-                            "end_effector_link",
-                            rclpy.time.Time()
-                        )
-                    except Exception as e:
-                        self.get_logger().error(f"❌ Failed to get current EE pose from TF: {e}")
+                if action == "move":
+                    # ✅ 현재 EE pose 조회
+                    curr_pose = self.get_current_ee_pose()
+                    if curr_pose is None:
                         return
 
                     goal_pose = PoseStamped()
                     goal_pose.header.frame_id = "world"
-                    goal_pose.pose.position.x = transform.transform.translation.x
-                    goal_pose.pose.position.y = transform.transform.translation.y
-                    goal_pose.pose.position.z = transform.transform.translation.z
-                    goal_pose.pose.orientation = transform.transform.rotation
+                    goal_pose.pose.position.x = curr_pose.pose.position.x
+                    goal_pose.pose.position.y = curr_pose.pose.position.y
+                    goal_pose.pose.position.z = curr_pose.pose.position.z
+                    goal_pose.pose.orientation = curr_pose.pose.orientation  # 방향 유지
 
                     step = value / 100.0 if unit.lower() == "cm" else float(value)
 
@@ -198,9 +218,11 @@ class NaturalCommandNode(Node):
                     self.send_ik_request(
                         goal_pose.pose.position.x,
                         goal_pose.pose.position.y,
-                        goal_pose.pose.position.z
+                        goal_pose.pose.position.z,
+                        goal_pose.pose.orientation
                     )
-
+                    return
+                 
                 point.positions = [
                     self.current_joint1_pos,
                     self.current_joint2_pos,
@@ -315,17 +337,24 @@ class NaturalCommandNode(Node):
 
         self.get_logger().info("✅ Initialization complete")
 
-    def send_ik_request(self, x, y, z):
+    def send_ik_request(self, x, y, z, orientation=None):
         pose = PoseStamped()
         pose.header.frame_id = "world"
         pose.pose.position.x = float(x)
         pose.pose.position.y = float(y)
         pose.pose.position.z = float(z)
 
-        pose.pose.orientation.x = 0.0
-        pose.pose.orientation.y = 1.0
-        pose.pose.orientation.z = 0.0
-        pose.pose.orientation.w = 0.0
+        if orientation is not None:
+            pose.pose.orientation = orientation
+        else:
+            pose.pose.orientation.w = 1.0
+
+        # 🎯 목표 위치 로그
+        self.get_logger().info(
+            f"🎯 Target → x:{x:.3f}, y:{y:.3f}, z:{z:.3f}, "
+            f"ori=({pose.pose.orientation.x:.2f}, {pose.pose.orientation.y:.2f}, "
+            f"{pose.pose.orientation.z:.2f}, {pose.pose.orientation.w:.2f})"
+        )
 
         req = GetPositionIK.Request()
         req.ik_request.group_name = "arm"
@@ -335,16 +364,13 @@ class NaturalCommandNode(Node):
 
         future = self.ik_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
-
         res = future.result()
+
         if res and res.error_code.val == 1:
             j = res.solution.joint_state
-
             joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
             name_to_pos = dict(zip(j.name, j.position))
             joint_positions = [name_to_pos.get(name, 0.0) for name in joint_names]
-
-            self.current_joint_positions = joint_positions
 
             traj = JointTrajectory()
             traj.joint_names = joint_names
@@ -357,8 +383,9 @@ class NaturalCommandNode(Node):
             self.get_logger().info(f"✅ IK-based movement completed: {joint_positions}")
         else:
             code = res.error_code.val if res else -1
-            self.get_logger().error(f"❌ IK computation failed (code: {code})")
-
+            self.get_logger().error(
+                f"❌ IK computation failed (code={code}) → target=({x:.3f}, {y:.3f}, {z:.3f})"
+            )
 
 def _spin_worker(node, stop_evt):
     while rclpy.ok() and not stop_evt.is_set():
