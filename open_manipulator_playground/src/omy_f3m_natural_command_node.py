@@ -1,7 +1,6 @@
 # natural_command_node.py — LLM-only JSON parser integration
 # 2025-08-12 — add continuous rotate with "keep" + stop (comments in English)
 
-# -------------------- import --------------------
 import re
 import json
 import math
@@ -17,9 +16,8 @@ from geometry_msgs.msg import PoseStamped
 from moveit_msgs.srv import GetPositionIK
 from tf2_ros import Buffer, TransformListener
 
-import threading  # ← ADDED: background spin for timers
+import threading
 
-# LLM-only JSON parser (loaded once / cached internally)
 try:
     from omy_f3m_llm_parser import parse_to_json
     HAS_LLM = True
@@ -27,7 +25,6 @@ except Exception as e:
     HAS_LLM = False
     print(f"[LLM] import failed: {e}")
 
-# -------------------- constants --------------------
 BASE_HEIGHT = 0.1715
 L1 = 0.1715
 L2 = 0.247
@@ -112,7 +109,7 @@ class NaturalCommandNode(Node):
                 return
 
             if action == "gripper":
-                pos_map = {"open": 0, "close": 1, "reset": 0}  # rad 값
+                pos_map = {"open": 0, "close": 1, "reset": 0}
                 pos = pos_map.get(str(cmd.get("direction") or "").lower(), None)
                 if pos is None:
                     self.get_logger().warn(f"⚠️ Unknown gripper direction: {cmd.get('direction')}")
@@ -120,12 +117,11 @@ class NaturalCommandNode(Node):
                 goal = GripperCommand.Goal()
                 goal.command = GripperCommandMsg()
                 goal.command.position = float(pos)
-                goal.command.max_effort = 10.0   # <-- effort 늘리기
+                goal.command.max_effort = 10.0
                 self.gripper_client.wait_for_server()
                 self.gripper_client.send_goal_async(goal)
                 self.get_logger().info(f"🦾 Gripper '{cmd['direction']}' executed")
                 return
-
 
             if action in ("rotate", "move"):
                 direction = cmd.get("direction")
@@ -164,29 +160,25 @@ class NaturalCommandNode(Node):
                         self.get_logger().warn(f"⚠️ Incomplete fields for move: {cmd}")
                         return
 
-                    # 1. 현재 EE pose를 TF에서 읽기
                     try:
                         transform = self.tf_buffer.lookup_transform(
-                            "world",                # 기준 frame (URDF/SRDF 확인 필요)
-                            "end_effector_link",    # EE 링크 이름
+                            "world",
+                            "end_effector_link",
                             rclpy.time.Time()
                         )
                     except Exception as e:
                         self.get_logger().error(f"❌ Failed to get current EE pose from TF: {e}")
                         return
 
-                    # Transform → PoseStamped 변환
                     goal_pose = PoseStamped()
                     goal_pose.header.frame_id = "world"
                     goal_pose.pose.position.x = transform.transform.translation.x
                     goal_pose.pose.position.y = transform.transform.translation.y
                     goal_pose.pose.position.z = transform.transform.translation.z
-                    goal_pose.pose.orientation = transform.transform.rotation  # orientation 유지
+                    goal_pose.pose.orientation = transform.transform.rotation
 
-                    # 2. 이동 단위 (cm → m)
                     step = value / 100.0 if unit.lower() == "cm" else float(value)
 
-                    # 3. direction 해석
                     if direction == "up":
                         goal_pose.pose.position.z += step
                     elif direction == "down":
@@ -203,13 +195,11 @@ class NaturalCommandNode(Node):
                         self.get_logger().warn(f"⚠️ Unknown move direction: {direction}")
                         return
 
-                    # 4. IK 요청 실행
                     self.send_ik_request(
                         goal_pose.pose.position.x,
                         goal_pose.pose.position.y,
                         goal_pose.pose.position.z
                     )
-
 
                 point.positions = [
                     self.current_joint1_pos,
@@ -224,7 +214,6 @@ class NaturalCommandNode(Node):
                 self.arm_pub.publish(traj)
                 self.get_logger().info(f"✅ Joint movement completed: {point.positions}")
                 return
-
 
             self.get_logger().warn(f"⚠️ Unknown action: {action}")
 
@@ -273,7 +262,6 @@ class NaturalCommandNode(Node):
         elif d == "right":
             new_positions[0] -= w * KEEP_DT
 
-        # update internal state
         self.current_joint1_pos = new_positions[0]
 
         pt.positions = new_positions
@@ -329,20 +317,19 @@ class NaturalCommandNode(Node):
 
     def send_ik_request(self, x, y, z):
         pose = PoseStamped()
-        pose.header.frame_id = "world"   # 로봇 기준 frame
+        pose.header.frame_id = "world"
         pose.pose.position.x = float(x)
         pose.pose.position.y = float(y)
         pose.pose.position.z = float(z)
 
-        # EE 방향 (예: z축 아래, y축 정렬 등) → 필요에 맞게 조정
         pose.pose.orientation.x = 0.0
         pose.pose.orientation.y = 1.0
         pose.pose.orientation.z = 0.0
         pose.pose.orientation.w = 0.0
 
         req = GetPositionIK.Request()
-        req.ik_request.group_name = "arm"  # SRDF group_name 확인 필수
-        req.ik_request.ik_link_name = "end_effector_link"  # EE 링크 이름 확인
+        req.ik_request.group_name = "arm"
+        req.ik_request.ik_link_name = "end_effector_link"
         req.ik_request.pose_stamped = pose
         req.ik_request.timeout.sec = 2
 
@@ -353,15 +340,12 @@ class NaturalCommandNode(Node):
         if res and res.error_code.val == 1:
             j = res.solution.joint_state
 
-            # 6축 조인트 이름 매핑
             joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
             name_to_pos = dict(zip(j.name, j.position))
             joint_positions = [name_to_pos.get(name, 0.0) for name in joint_names]
 
-            # 내부 상태 업데이트 (원하면 저장)
             self.current_joint_positions = joint_positions
 
-            # Trajectory 메시지 생성
             traj = JointTrajectory()
             traj.joint_names = joint_names
             pt = JointTrajectoryPoint()
@@ -369,13 +353,11 @@ class NaturalCommandNode(Node):
             pt.time_from_start.sec = 2
             traj.points.append(pt)
 
-            # 퍼블리시
             self.arm_pub.publish(traj)
             self.get_logger().info(f"✅ IK-based movement completed: {joint_positions}")
         else:
             code = res.error_code.val if res else -1
             self.get_logger().error(f"❌ IK computation failed (code: {code})")
-
 
 
 def _spin_worker(node, stop_evt):
