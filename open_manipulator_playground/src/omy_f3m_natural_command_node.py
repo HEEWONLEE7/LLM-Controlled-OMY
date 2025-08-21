@@ -185,7 +185,6 @@ class NaturalCommandNode(Node):
                         return
 
                 if action == "move":
-                    # ✅ 현재 EE pose 조회
                     curr_pose = self.get_current_ee_pose()
                     if curr_pose is None:
                         return
@@ -395,31 +394,15 @@ def main():
     rclpy.init()
     node = NaturalCommandNode()
 
-    stop_evt = threading.Event()
-    spin_thread = threading.Thread(target=_spin_worker, args=(node, stop_evt), daemon=True)
-    spin_thread.start()
-
-    print("💬 Enter a command ")
     try:
-        while rclpy.ok():
-            text = input(">>> ").strip()
-            if text.lower() == "exit":
-                break
-
-            cmd = node.parse_command_with_llm(text)
-            if not cmd:
-                print("⚠️ Could not parse command (LLM off or invalid).")
-                continue
-
-            print("📦 Parsed command:", json.dumps(cmd, ensure_ascii=False))
-            node.process_command(cmd)
+        # 키보드 입력 루프 대신 ROS2 이벤트 루프만 돌림
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        stop_evt.set()
-        spin_thread.join(timeout=1.0)
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
