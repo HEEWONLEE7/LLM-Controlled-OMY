@@ -2,7 +2,7 @@
 
 # Get the directory where the script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-CONTAINER_NAME="open_manipulator"
+CONTAINER_NAME="omy"
 
 # Function to display help
 show_help() {
@@ -30,7 +30,7 @@ start_container() {
         echo "Warning: DISPLAY environment variable is not set. X11 forwarding will not be available."
     fi
 
-    echo "Starting Open Manipulator container..."
+    echo "Starting OMY container..."
 
     # Copy udev rule for FTDI (U2D2)
     echo 'KERNEL=="ttyUSB*", DRIVERS=="ftdi_sio", MODE="0666", ATTR{device/latency_timer}="1"' | sudo tee /etc/udev/rules.d/99-u2d2.rules > /dev/null

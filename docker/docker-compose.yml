@@ -1,6 +1,6 @@
 services:
-  open_manipulator:
-    container_name: open_manipulator
+  omy:
+    container_name: omy
     build:
       context: .
       dockerfile: Dockerfile
